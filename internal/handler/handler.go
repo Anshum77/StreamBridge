@@ -1,0 +1,236 @@
+// Package handler implements HTTP route handlers for the StreamBridge REST API.
+// All handlers receive shared dependencies (DB pool, Redis, logger) via the Handler struct.
+package handler
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
+	"github.com/rs/zerolog"
+
+	"github.com/Anshum77/StreamBridge/internal/model"
+)
+
+// Handler holds shared dependencies injected at server startup.
+type Handler struct {
+	db     *pgxpool.Pool
+	redis  *redis.Client
+	logger zerolog.Logger
+}
+
+// New creates a Handler with all required dependencies.
+func New(db *pgxpool.Pool, redisClient *redis.Client, logger zerolog.Logger) *Handler {
+	return &Handler{
+		db:     db,
+		redis:  redisClient,
+		logger: logger,
+	}
+}
+
+// RegisterRoutes maps URL paths to handler methods.
+// Keeping route registration here (not in main) makes the API surface self-documenting.
+func (h *Handler) RegisterRoutes(router *gin.Engine) {
+	router.GET("/health", h.health)
+	router.GET("/ready", h.ready)
+
+	channels := router.Group("/channels")
+	channels.GET("", h.listChannels)
+	channels.POST("", h.createChannel)
+	channels.GET("/:id", h.getChannel)
+	channels.PUT("/:id", h.updateChannel)
+	channels.DELETE("/:id", h.deleteChannel)
+}
+
+// health is a lightweight liveness probe — returns 200 if the process is running.
+func (h *Handler) health(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+// ready is a readiness probe — returns 200 only if both Postgres and Redis are reachable.
+// Used by orchestrators (Docker, K8s) to decide if the instance should receive traffic.
+func (h *Handler) ready(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+	defer cancel()
+
+	if err := h.db.Ping(ctx); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not_ready", "postgres": "down"})
+		return
+	}
+	if err := h.redis.Ping(ctx).Err(); err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not_ready", "redis": "down"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "ready"})
+}
+
+// listChannels returns all channels ordered by newest first.
+func (h *Handler) listChannels(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
+
+	rows, err := h.db.Query(ctx, `
+		SELECT id, name, created_at, updated_at
+		FROM channels
+		ORDER BY created_at DESC
+	`)
+	if err != nil {
+		h.internalError(c, err)
+		return
+	}
+	defer rows.Close()
+
+	channels := make([]model.Channel, 0)
+	for rows.Next() {
+		var channel model.Channel
+		if err := rows.Scan(&channel.ID, &channel.Name, &channel.CreatedAt, &channel.UpdatedAt); err != nil {
+			h.internalError(c, err)
+			return
+		}
+		channels = append(channels, channel)
+	}
+	if err := rows.Err(); err != nil {
+		h.internalError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"channels": channels})
+}
+
+// createChannel inserts a new channel and returns it with the generated UUID.
+func (h *Handler) createChannel(c *gin.Context) {
+	var req channelRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "channel name is required"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
+
+	var channel model.Channel
+	err := h.db.QueryRow(ctx, `
+		INSERT INTO channels (name)
+		VALUES ($1)
+		RETURNING id, name, created_at, updated_at
+	`, name).Scan(&channel.ID, &channel.Name, &channel.CreatedAt, &channel.UpdatedAt)
+	if err != nil {
+		h.internalError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusCreated, channel)
+}
+
+// getChannel looks up a single channel by its UUID.
+func (h *Handler) getChannel(c *gin.Context) {
+	channel, err := h.findChannel(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		h.handleLookupError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, channel)
+}
+
+// updateChannel replaces the channel name (PUT semantics = full replace).
+func (h *Handler) updateChannel(c *gin.Context) {
+	var req channelRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "channel name is required"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
+
+	var channel model.Channel
+	err := h.db.QueryRow(ctx, `
+		UPDATE channels
+		SET name = $2, updated_at = now()
+		WHERE id = $1
+		RETURNING id, name, created_at, updated_at
+	`, c.Param("id"), name).Scan(&channel.ID, &channel.Name, &channel.CreatedAt, &channel.UpdatedAt)
+	if err != nil {
+		h.handleLookupError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, channel)
+}
+
+// deleteChannel removes a channel by UUID. Returns 204 on success, 404 if not found.
+func (h *Handler) deleteChannel(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
+
+	result, err := h.db.Exec(ctx, "DELETE FROM channels WHERE id = $1", c.Param("id"))
+	if err != nil {
+		h.internalError(c, err)
+		return
+	}
+	if result.RowsAffected() == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
+		return
+	}
+
+	c.Status(http.StatusNoContent)
+}
+
+// findChannel is a shared lookup used by get and update handlers.
+func (h *Handler) findChannel(parent context.Context, id string) (model.Channel, error) {
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
+	defer cancel()
+
+	var channel model.Channel
+	err := h.db.QueryRow(ctx, `
+		SELECT id, name, created_at, updated_at
+		FROM channels
+		WHERE id = $1
+	`, id).Scan(&channel.ID, &channel.Name, &channel.CreatedAt, &channel.UpdatedAt)
+	if err != nil {
+		return model.Channel{}, err
+	}
+
+	return channel, nil
+}
+
+// handleLookupError maps pgx.ErrNoRows → 404, everything else → 500.
+func (h *Handler) handleLookupError(c *gin.Context, err error) {
+	if errors.Is(err, pgx.ErrNoRows) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
+		return
+	}
+
+	h.internalError(c, err)
+}
+
+// internalError logs the actual error server-side but returns a generic message
+// to the client — never leak internal details in API responses.
+func (h *Handler) internalError(c *gin.Context, err error) {
+	h.logger.Error().Err(err).Msg("handler error")
+	c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+}
+
+type channelRequest struct {
+	Name string `json:"name"`
+}

@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS channels;
+DROP EXTENSION IF EXISTS pgcrypto;
