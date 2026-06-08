@@ -15,6 +15,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 
+	"github.com/Anshum77/StreamBridge/internal/hub"
 	"github.com/Anshum77/StreamBridge/internal/model"
 )
 
@@ -22,14 +23,16 @@ import (
 type Handler struct {
 	db     *pgxpool.Pool
 	redis  *redis.Client
+	hub    *hub.Hub
 	logger zerolog.Logger
 }
 
 // New creates a Handler with all required dependencies.
-func New(db *pgxpool.Pool, redisClient *redis.Client, logger zerolog.Logger) *Handler {
+func New(db *pgxpool.Pool, redisClient *redis.Client, wsHub *hub.Hub, logger zerolog.Logger) *Handler {
 	return &Handler{
 		db:     db,
 		redis:  redisClient,
+		hub:    wsHub,
 		logger: logger,
 	}
 }
@@ -46,6 +49,7 @@ func (h *Handler) RegisterRoutes(router *gin.Engine) {
 	channels.GET("/:id", h.getChannel)
 	channels.PUT("/:id", h.updateChannel)
 	channels.DELETE("/:id", h.deleteChannel)
+	channels.GET("/:id/ws", h.subscribeWS) // WebSocket upgrade endpoint
 }
 
 // health is a lightweight liveness probe — returns 200 if the process is running.
@@ -234,3 +238,11 @@ func (h *Handler) internalError(c *gin.Context, err error) {
 type channelRequest struct {
 	Name string `json:"name"`
 }
+
+// subscribeWS upgrades the HTTP connection to WebSocket for real-time event delivery.
+// Gin wraps the raw http.ResponseWriter, so we pass it directly to the upgrade handler.
+func (h *Handler) subscribeWS(c *gin.Context) {
+	channelID := c.Param("id")
+	hub.ServeWS(h.hub, channelID, c.Writer, c.Request, h.logger)
+}
+

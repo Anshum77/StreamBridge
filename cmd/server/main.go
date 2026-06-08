@@ -16,6 +16,7 @@ import (
 	"github.com/Anshum77/StreamBridge/config"
 	"github.com/Anshum77/StreamBridge/database"
 	"github.com/Anshum77/StreamBridge/internal/handler"
+	"github.com/Anshum77/StreamBridge/internal/hub"
 	"github.com/Anshum77/StreamBridge/internal/middleware"
 )
 
@@ -66,7 +67,10 @@ func main() {
 	router.Use(gin.Recovery())
 	router.Use(middleware.RequestLogger(logger))
 
-	serverHandler := handler.New(dbPool, redisClient, logger)
+	// WebSocket hub — central coordinator for all real-time connections.
+	wsHub := hub.NewHub(logger)
+
+	serverHandler := handler.New(dbPool, redisClient, wsHub, logger)
 	serverHandler.RegisterRoutes(router)
 
 	server := &http.Server{

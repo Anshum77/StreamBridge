@@ -1,6 +1,10 @@
 .git
 .env
-bin
-dist
+.sixth/
+bin/
+dist/
 coverage.out
+coverage.html
 *.log
+*.exe
+*.test
