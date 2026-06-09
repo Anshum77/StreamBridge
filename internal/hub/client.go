@@ -14,6 +14,14 @@ const (
 	// Time allowed to write a message to the peer.
 	writeWait = 10 * time.Second
 
+	// Time allowed to read the next pong message from the peer.
+	// If no pong arrives within this window, the connection is considered dead.
+	pongWait = 30 * time.Second
+
+	// Pings are sent at this interval. Must be less than pongWait so the
+	// client has time to respond before the read deadline expires.
+	pingPeriod = (pongWait * 9) / 10 // 27s
+
 	// Maximum message size allowed from peer (64KB).
 	// Prevents a single client from flooding the server with oversized payloads.
 	maxMessageSize = 64 * 1024
@@ -30,9 +38,8 @@ type Client struct {
 }
 
 // readPump runs in its own goroutine, one per client.
-// It continuously reads from the WebSocket connection. Its real job isn't to
-// process messages — it's to detect when the client disconnects so we can
-// clean up the connection and free resources.
+// It continuously reads from the WebSocket connection to detect disconnects
+// and handles pong responses to keep the heartbeat alive.
 func (c *Client) readPump() {
 	defer func() {
 		// Notify the Hub to remove this client from the subscriber map.
@@ -44,10 +51,18 @@ func (c *Client) readPump() {
 
 	c.conn.SetReadLimit(maxMessageSize)
 
+	// Set the initial read deadline. If no data (including pong) arrives
+	// within pongWait, ReadMessage returns an error and we clean up.
+	c.conn.SetReadDeadline(time.Now().Add(pongWait))
+
+	// When a pong arrives, push the read deadline forward.
+	// This keeps the connection alive as long as the client is responsive.
+	c.conn.SetPongHandler(func(string) error {
+		c.conn.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
+
 	for {
-		// ReadMessage blocks until a message arrives or the connection breaks.
-		// We don't use the message content yet — the purpose is to detect
-		// disconnect (err != nil) which breaks the loop and triggers cleanup.
 		_, _, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
@@ -59,24 +74,40 @@ func (c *Client) readPump() {
 }
 
 // writePump runs in its own goroutine, one per client.
-// It drains the send channel and writes each message to the WebSocket connection.
-// This is the only goroutine that writes to the conn — gorilla/websocket requires
-// at most one concurrent writer.
+// It drains the send channel and periodically pings the client to detect
+// dead connections. This is the only goroutine that writes to the conn.
 func (c *Client) writePump() {
-	defer c.conn.Close()
+	// Ticker fires every pingPeriod to send heartbeat pings.
+	ticker := time.NewTicker(pingPeriod)
+	defer func() {
+		ticker.Stop()
+		c.conn.Close()
+	}()
 
-	for message := range c.send {
-		// Set a deadline so a slow/dead client doesn't block the writer forever.
-		c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+	for {
+		select {
+		case message, ok := <-c.send:
+			if !ok {
+				// Hub closed the send channel — send a close frame and exit.
+				c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
 
-		if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
-			c.logger.Warn().Err(err).Msg("write failed")
-			return
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+				c.logger.Warn().Err(err).Msg("write failed")
+				return
+			}
+
+		case <-ticker.C:
+			// Send a ping frame. If the write deadline expires (client is
+			// unreachable), the next ReadMessage in readPump will also fail
+			// and trigger cleanup.
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
 		}
 	}
-
-	// send channel was closed (by Hub or readPump cleanup) — send a close frame
-	// to gracefully inform the client before dropping the connection.
-	c.conn.SetWriteDeadline(time.Now().Add(writeWait))
-	c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 }
