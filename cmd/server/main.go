@@ -68,7 +68,9 @@ func main() {
 	router.Use(middleware.RequestLogger(logger))
 
 	// WebSocket hub — central coordinator for all real-time connections.
+	// Must be running before any client can register.
 	wsHub := hub.NewHub(logger)
+	go wsHub.Run()
 
 	serverHandler := handler.New(dbPool, redisClient, wsHub, logger)
 	serverHandler.RegisterRoutes(router)

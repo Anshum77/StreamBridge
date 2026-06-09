@@ -38,6 +38,9 @@ func ServeWS(hub *Hub, channelID string, w http.ResponseWriter, r *http.Request,
 		Str("remote", conn.RemoteAddr().String()).
 		Msg("websocket client connected")
 
+	// Register with the Hub so this client receives broadcasts for its channel.
+	hub.register <- client
+
 	// Each pump runs in its own goroutine. readPump detects disconnect,
 	// writePump delivers messages. They share nothing except the send channel.
 	go client.writePump()

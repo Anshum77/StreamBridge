@@ -35,7 +35,9 @@ type Client struct {
 // clean up the connection and free resources.
 func (c *Client) readPump() {
 	defer func() {
-		// Client disconnected — clean up the connection and free resources.
+		// Notify the Hub to remove this client from the subscriber map.
+		// The Hub will close the send channel, which stops writePump.
+		c.hub.unregister <- c
 		c.conn.Close()
 		c.logger.Info().Msg("client disconnected")
 	}()
