@@ -37,8 +37,7 @@ func New(db *pgxpool.Pool, redisClient *redis.Client, wsHub *hub.Hub, logger zer
 	}
 }
 
-// RegisterRoutes maps URL paths to handler methods.
-// Keeping route registration here (not in main) makes the API surface self-documenting.
+// RegisterRoutes maps all API endpoints to their handler methods.
 func (h *Handler) RegisterRoutes(router *gin.Engine) {
 	router.GET("/health", h.health)
 	router.GET("/ready", h.ready)
@@ -49,7 +48,8 @@ func (h *Handler) RegisterRoutes(router *gin.Engine) {
 	channels.GET("/:id", h.getChannel)
 	channels.PUT("/:id", h.updateChannel)
 	channels.DELETE("/:id", h.deleteChannel)
-	channels.GET("/:id/ws", h.subscribeWS) // WebSocket upgrade endpoint
+	channels.GET("/:id/ws", h.subscribeWS)      // WebSocket upgrade endpoint
+	channels.POST("/:id/publish", h.publishEvent) // Broadcast to WS subscribers
 }
 
 // health is a lightweight liveness probe — returns 200 if the process is running.
@@ -58,7 +58,6 @@ func (h *Handler) health(c *gin.Context) {
 }
 
 // ready is a readiness probe — returns 200 only if both Postgres and Redis are reachable.
-// Used by orchestrators (Docker, K8s) to decide if the instance should receive traffic.
 func (h *Handler) ready(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 	defer cancel()
@@ -228,8 +227,7 @@ func (h *Handler) handleLookupError(c *gin.Context, err error) {
 	h.internalError(c, err)
 }
 
-// internalError logs the actual error server-side but returns a generic message
-// to the client — never leak internal details in API responses.
+// internalError logs the real error and returns a generic 500 to the client.
 func (h *Handler) internalError(c *gin.Context, err error) {
 	h.logger.Error().Err(err).Msg("handler error")
 	c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
@@ -240,9 +238,26 @@ type channelRequest struct {
 }
 
 // subscribeWS upgrades the HTTP connection to WebSocket for real-time event delivery.
-// Gin wraps the raw http.ResponseWriter, so we pass it directly to the upgrade handler.
 func (h *Handler) subscribeWS(c *gin.Context) {
 	channelID := c.Param("id")
 	hub.ServeWS(h.hub, channelID, c.Writer, c.Request, h.logger)
+}
+
+// publishEvent broadcasts a JSON payload to all WebSocket subscribers of a channel.
+func (h *Handler) publishEvent(c *gin.Context) {
+	var req publishRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	channelID := c.Param("id")
+	h.hub.Broadcast(channelID, []byte(req.Data))
+
+	c.JSON(http.StatusOK, gin.H{"status": "published", "channel": channelID})
+}
+
+type publishRequest struct {
+	Data string `json:"data" binding:"required"`
 }
 

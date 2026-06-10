@@ -11,8 +11,7 @@ import (
 	"github.com/Anshum77/StreamBridge/config"
 )
 
-// NewPool creates a pgx connection pool with sensible defaults.
-// Pooling reuses connections instead of dialing per-request — critical at high throughput.
+// NewPool creates a pgx connection pool with tuned limits for production use.
 func NewPool(ctx context.Context, cfg config.Config, logger zerolog.Logger) (*pgxpool.Pool, error) {
 	poolConfig, err := pgxpool.ParseConfig(cfg.DatabaseURL)
 	if err != nil {

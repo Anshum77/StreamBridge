@@ -41,8 +41,7 @@ func ServeWS(hub *Hub, channelID string, w http.ResponseWriter, r *http.Request,
 	// Register with the Hub so this client receives broadcasts for its channel.
 	hub.register <- client
 
-	// Each pump runs in its own goroutine. readPump detects disconnect,
-	// writePump delivers messages. They share nothing except the send channel.
+	// Launch bidirectional I/O pumps.
 	go client.writePump()
 	go client.readPump()
 }

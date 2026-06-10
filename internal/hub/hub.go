@@ -9,9 +9,8 @@ type Message struct {
 }
 
 // Hub is the central coordinator for all WebSocket connections.
-// It runs a single event loop goroutine that owns the client map — all
-// register/unregister/broadcast operations go through channels, so no
-// mutex is needed. This is the idiomatic Go concurrency pattern.
+// A single-goroutine event loop owns the client map; all mutations
+// flow through channels, eliminating the need for a mutex.
 type Hub struct {
 	// Channel-scoped client registry: channelID → set of connected clients.
 	clients map[string]map[*Client]bool
@@ -35,9 +34,14 @@ func NewHub(logger zerolog.Logger) *Hub {
 	}
 }
 
-// Run starts the Hub's event loop. Must be called in its own goroutine (go hub.Run()).
-// It blocks forever, processing register/unregister/broadcast events sequentially.
-// Sequential processing on a single goroutine eliminates race conditions on the client map.
+// Broadcast fans out a message to all subscribers of the given channel.
+// Goroutine-safe; dispatched through the Hub's internal event loop.
+func (h *Hub) Broadcast(channelID string, data []byte) {
+	h.broadcast <- Message{ChannelID: channelID, Data: data}
+}
+
+// Run starts the Hub's event loop in a dedicated goroutine.
+// Processes register/unregister/broadcast events sequentially to avoid races.
 func (h *Hub) Run() {
 	for {
 		select {
@@ -76,10 +80,9 @@ func (h *Hub) Run() {
 			for client := range subscribers {
 				select {
 				case client.send <- msg.Data:
-					// Message queued for delivery via writePump.
+						// Queued for delivery.
 				default:
-					// Send buffer full — client is too slow. Drop it to protect
-					// the Hub from blocking on one slow consumer.
+					// Send buffer full — evict slow consumer to protect throughput.
 					close(client.send)
 					delete(subscribers, client)
 					h.logger.Warn().

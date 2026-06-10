@@ -37,13 +37,11 @@ type Client struct {
 	logger    zerolog.Logger
 }
 
-// readPump runs in its own goroutine, one per client.
-// It continuously reads from the WebSocket connection to detect disconnects
-// and handles pong responses to keep the heartbeat alive.
+// readPump runs in a dedicated goroutine per client.
+// Listens for incoming messages and pong frames; exits on disconnect.
 func (c *Client) readPump() {
 	defer func() {
-		// Notify the Hub to remove this client from the subscriber map.
-		// The Hub will close the send channel, which stops writePump.
+		// Unregister triggers Hub cleanup → closes send channel → stops writePump.
 		c.hub.unregister <- c
 		c.conn.Close()
 		c.logger.Info().Msg("client disconnected")
@@ -51,12 +49,10 @@ func (c *Client) readPump() {
 
 	c.conn.SetReadLimit(maxMessageSize)
 
-	// Set the initial read deadline. If no data (including pong) arrives
-	// within pongWait, ReadMessage returns an error and we clean up.
+	// Initial read deadline; extended on each pong response.
 	c.conn.SetReadDeadline(time.Now().Add(pongWait))
 
-	// When a pong arrives, push the read deadline forward.
-	// This keeps the connection alive as long as the client is responsive.
+	// Each pong resets the read deadline, keeping the connection alive.
 	c.conn.SetPongHandler(func(string) error {
 		c.conn.SetReadDeadline(time.Now().Add(pongWait))
 		return nil
@@ -73,9 +69,8 @@ func (c *Client) readPump() {
 	}
 }
 
-// writePump runs in its own goroutine, one per client.
-// It drains the send channel and periodically pings the client to detect
-// dead connections. This is the only goroutine that writes to the conn.
+// writePump runs in a dedicated goroutine per client.
+// Delivers queued messages and sends periodic pings. Sole writer to the conn.
 func (c *Client) writePump() {
 	// Ticker fires every pingPeriod to send heartbeat pings.
 	ticker := time.NewTicker(pingPeriod)
@@ -101,9 +96,7 @@ func (c *Client) writePump() {
 			}
 
 		case <-ticker.C:
-			// Send a ping frame. If the write deadline expires (client is
-			// unreachable), the next ReadMessage in readPump will also fail
-			// and trigger cleanup.
+			// Heartbeat ping; write failure cascades into readPump exit.
 			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
