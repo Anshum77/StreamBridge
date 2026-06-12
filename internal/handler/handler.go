@@ -4,8 +4,10 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,22 +19,25 @@ import (
 
 	"github.com/Anshum77/StreamBridge/internal/hub"
 	"github.com/Anshum77/StreamBridge/internal/model"
+	"github.com/Anshum77/StreamBridge/internal/repository"
 )
 
 // Handler holds shared dependencies injected at server startup.
 type Handler struct {
-	db     *pgxpool.Pool
-	redis  *redis.Client
-	hub    *hub.Hub
-	logger zerolog.Logger
+	db       *pgxpool.Pool
+	redis    *redis.Client
+	hub      *hub.Hub
+	events   *repository.EventRepo
+	logger   zerolog.Logger
 }
 
 // New creates a Handler with all required dependencies.
-func New(db *pgxpool.Pool, redisClient *redis.Client, wsHub *hub.Hub, logger zerolog.Logger) *Handler {
+func New(db *pgxpool.Pool, redisClient *redis.Client, wsHub *hub.Hub, eventRepo *repository.EventRepo, logger zerolog.Logger) *Handler {
 	return &Handler{
 		db:     db,
 		redis:  redisClient,
 		hub:    wsHub,
+		events: eventRepo,
 		logger: logger,
 	}
 }
@@ -48,8 +53,9 @@ func (h *Handler) RegisterRoutes(router *gin.Engine) {
 	channels.GET("/:id", h.getChannel)
 	channels.PUT("/:id", h.updateChannel)
 	channels.DELETE("/:id", h.deleteChannel)
-	channels.GET("/:id/ws", h.subscribeWS)      // WebSocket upgrade endpoint
-	channels.POST("/:id/publish", h.publishEvent) // Broadcast to WS subscribers
+	channels.GET("/:id/ws", h.subscribeWS)        // WebSocket upgrade endpoint
+	channels.GET("/:id/events", h.replayEvents)    // Replay missed events by offset
+	channels.POST("/:id/events", h.publishEvent)   // Persist + broadcast
 }
 
 // health is a lightweight liveness probe — returns 200 if the process is running.
@@ -243,7 +249,8 @@ func (h *Handler) subscribeWS(c *gin.Context) {
 	hub.ServeWS(h.hub, channelID, c.Writer, c.Request, h.logger)
 }
 
-// publishEvent broadcasts a JSON payload to all WebSocket subscribers of a channel.
+// publishEvent persists an event to Postgres, then broadcasts to WebSocket subscribers.
+// Persist-first guarantees durability — even if the broadcast fails, clients can replay.
 func (h *Handler) publishEvent(c *gin.Context) {
 	var req publishRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -252,12 +259,38 @@ func (h *Handler) publishEvent(c *gin.Context) {
 	}
 
 	channelID := c.Param("id")
-	h.hub.Broadcast(channelID, []byte(req.Data))
 
-	c.JSON(http.StatusOK, gin.H{"status": "published", "channel": channelID})
+	// Persist first — durable before broadcast.
+	event, err := h.events.Insert(c.Request.Context(), channelID, req.Payload)
+	if err != nil {
+		h.internalError(c, err)
+		return
+	}
+
+	// Broadcast to live WebSocket subscribers.
+	wsPayload, _ := json.Marshal(event)
+	h.hub.Broadcast(channelID, wsPayload)
+
+	c.JSON(http.StatusCreated, event)
 }
 
 type publishRequest struct {
-	Data string `json:"data" binding:"required"`
+	Payload json.RawMessage `json:"payload" binding:"required"`
 }
 
+// replayEvents returns persisted events for a channel after a given offset.
+// Clients call this on reconnect to catch up on missed events.
+func (h *Handler) replayEvents(c *gin.Context) {
+	channelID := c.Param("id")
+
+	afterOffset, _ := strconv.ParseInt(c.DefaultQuery("after_offset", "0"), 10, 64)
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+
+	events, err := h.events.ListAfterOffset(c.Request.Context(), channelID, afterOffset, limit)
+	if err != nil {
+		h.internalError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"events": events, "count": len(events)})
+}

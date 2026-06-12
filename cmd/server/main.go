@@ -18,6 +18,7 @@ import (
 	"github.com/Anshum77/StreamBridge/internal/handler"
 	"github.com/Anshum77/StreamBridge/internal/hub"
 	"github.com/Anshum77/StreamBridge/internal/middleware"
+	"github.com/Anshum77/StreamBridge/internal/repository"
 )
 
 func main() {
@@ -72,7 +73,9 @@ func main() {
 	wsHub := hub.NewHub(logger)
 	go wsHub.Run()
 
-	serverHandler := handler.New(dbPool, redisClient, wsHub, logger)
+	eventRepo := repository.NewEventRepo(dbPool)
+
+	serverHandler := handler.New(dbPool, redisClient, wsHub, eventRepo, logger)
 	serverHandler.RegisterRoutes(router)
 
 	server := &http.Server{
