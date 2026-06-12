@@ -80,7 +80,7 @@ func (h *Hub) Run() {
 			for client := range subscribers {
 				select {
 				case client.send <- msg.Data:
-						// Queued for delivery.
+					// Queued for delivery.
 				default:
 					// Send buffer full — evict slow consumer to protect throughput.
 					close(client.send)
