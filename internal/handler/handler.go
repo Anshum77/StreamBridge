@@ -18,7 +18,9 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/Anshum77/StreamBridge/internal/hub"
+	"github.com/Anshum77/StreamBridge/internal/middleware"
 	"github.com/Anshum77/StreamBridge/internal/model"
+	"github.com/Anshum77/StreamBridge/internal/ratelimit"
 	"github.com/Anshum77/StreamBridge/internal/repository"
 )
 
@@ -28,17 +30,19 @@ type Handler struct {
 	redis    *redis.Client
 	hub      *hub.Hub
 	events   *repository.EventRepo
+	limiter  *ratelimit.Limiter
 	logger   zerolog.Logger
 }
 
 // New creates a Handler with all required dependencies.
-func New(db *pgxpool.Pool, redisClient *redis.Client, wsHub *hub.Hub, eventRepo *repository.EventRepo, logger zerolog.Logger) *Handler {
+func New(db *pgxpool.Pool, redisClient *redis.Client, wsHub *hub.Hub, eventRepo *repository.EventRepo, limiter *ratelimit.Limiter, logger zerolog.Logger) *Handler {
 	return &Handler{
-		db:     db,
-		redis:  redisClient,
-		hub:    wsHub,
-		events: eventRepo,
-		logger: logger,
+		db:      db,
+		redis:   redisClient,
+		hub:     wsHub,
+		events:  eventRepo,
+		limiter: limiter,
+		logger:  logger,
 	}
 }
 
@@ -53,9 +57,9 @@ func (h *Handler) RegisterRoutes(router *gin.Engine) {
 	channels.GET("/:id", h.getChannel)
 	channels.PUT("/:id", h.updateChannel)
 	channels.DELETE("/:id", h.deleteChannel)
-	channels.GET("/:id/ws", h.subscribeWS)        // WebSocket upgrade endpoint
-	channels.GET("/:id/events", h.replayEvents)    // Replay missed events by offset
-	channels.POST("/:id/events", h.publishEvent)   // Persist + broadcast
+	channels.GET("/:id/ws", h.subscribeWS)
+	channels.GET("/:id/events", h.replayEvents)
+	channels.POST("/:id/events", middleware.RateLimiter(h.limiter), h.publishEvent)
 }
 
 // health is a lightweight liveness probe — returns 200 if the process is running.

@@ -18,6 +18,7 @@ import (
 	"github.com/Anshum77/StreamBridge/internal/handler"
 	"github.com/Anshum77/StreamBridge/internal/hub"
 	"github.com/Anshum77/StreamBridge/internal/middleware"
+	"github.com/Anshum77/StreamBridge/internal/ratelimit"
 	"github.com/Anshum77/StreamBridge/internal/repository"
 )
 
@@ -74,8 +75,9 @@ func main() {
 	go wsHub.Run()
 
 	eventRepo := repository.NewEventRepo(dbPool)
+	limiter := ratelimit.NewLimiter(redisClient, cfg.RateLimit, cfg.RateWindow)
 
-	serverHandler := handler.New(dbPool, redisClient, wsHub, eventRepo, logger)
+	serverHandler := handler.New(dbPool, redisClient, wsHub, eventRepo, limiter, logger)
 	serverHandler.RegisterRoutes(router)
 
 	server := &http.Server{
