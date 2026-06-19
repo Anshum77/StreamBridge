@@ -75,9 +75,10 @@ func main() {
 	go wsHub.Run()
 
 	eventRepo := repository.NewEventRepo(dbPool)
+	tenantRepo := repository.NewTenantRepo(dbPool)
 	limiter := ratelimit.NewLimiter(redisClient, cfg.RateLimit, cfg.RateWindow)
 
-	serverHandler := handler.New(dbPool, redisClient, wsHub, eventRepo, limiter, logger)
+	serverHandler := handler.New(dbPool, redisClient, wsHub, eventRepo, tenantRepo, limiter, cfg.AdminAPIKey, logger)
 	serverHandler.RegisterRoutes(router)
 
 	server := &http.Server{

@@ -21,6 +21,7 @@ type Config struct {
 	RedisDB         int
 	RateLimit       int
 	RateWindow      time.Duration
+	AdminAPIKey     string
 	MigrationsPath  string
 	ShutdownTimeout time.Duration
 }
@@ -58,6 +59,7 @@ func Load() (Config, error) {
 		RedisDB:         redisDB,
 		RateLimit:       rateLimit,
 		RateWindow:      rateWindow,
+		AdminAPIKey:     stringEnv("ADMIN_API_KEY", "super-secret-admin-key"),
 		MigrationsPath:  stringEnv("MIGRATIONS_PATH", "migrations"),
 		ShutdownTimeout: shutdownTimeout,
 	}

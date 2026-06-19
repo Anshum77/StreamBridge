@@ -30,19 +30,23 @@ type Handler struct {
 	redis    *redis.Client
 	hub      *hub.Hub
 	events   *repository.EventRepo
+	tenants  *repository.TenantRepo
 	limiter  *ratelimit.Limiter
+	adminKey string
 	logger   zerolog.Logger
 }
 
 // New creates a Handler with all required dependencies.
-func New(db *pgxpool.Pool, redisClient *redis.Client, wsHub *hub.Hub, eventRepo *repository.EventRepo, limiter *ratelimit.Limiter, logger zerolog.Logger) *Handler {
+func New(db *pgxpool.Pool, redisClient *redis.Client, wsHub *hub.Hub, eventRepo *repository.EventRepo, tenantRepo *repository.TenantRepo, limiter *ratelimit.Limiter, adminKey string, logger zerolog.Logger) *Handler {
 	return &Handler{
-		db:      db,
-		redis:   redisClient,
-		hub:     wsHub,
-		events:  eventRepo,
-		limiter: limiter,
-		logger:  logger,
+		db:       db,
+		redis:    redisClient,
+		hub:      wsHub,
+		events:   eventRepo,
+		tenants:  tenantRepo,
+		limiter:  limiter,
+		adminKey: adminKey,
+		logger:   logger,
 	}
 }
 
@@ -60,6 +64,19 @@ func (h *Handler) RegisterRoutes(router *gin.Engine) {
 	channels.GET("/:id/ws", h.subscribeWS)
 	channels.GET("/:id/events", h.replayEvents)
 	channels.POST("/:id/events", middleware.RateLimiter(h.limiter), h.publishEvent)
+
+	// Admin API (provisioning tenants and keys)
+	admin := router.Group("/admin")
+	admin.Use(func(c *gin.Context) {
+		auth := c.GetHeader("Authorization")
+		if auth != "Bearer "+h.adminKey {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized admin"})
+			return
+		}
+		c.Next()
+	})
+	admin.POST("/tenants", h.createTenant)
+	admin.POST("/tenants/:id/keys", h.generateAPIKey)
 }
 
 // health is a lightweight liveness probe — returns 200 if the process is running.
