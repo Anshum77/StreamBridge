@@ -50,26 +50,22 @@ type Result struct {
 // Limiter enforces per-client request limits using a sliding window over Redis.
 type Limiter struct {
 	client *redis.Client
-	max    int
-	window time.Duration
 }
 
-// NewLimiter creates a rate limiter that allows max requests per rolling window.
-func NewLimiter(client *redis.Client, max int, window time.Duration) *Limiter {
+// NewLimiter creates a rate limiter instance backed by Redis.
+func NewLimiter(client *redis.Client) *Limiter {
 	return &Limiter{
 		client: client,
-		max:    max,
-		window: window,
 	}
 }
 
-// Allow checks if the given key is within the rate limit.
-func (l *Limiter) Allow(ctx context.Context, key string) (Result, error) {
+// Allow checks if the given key is within the dynamic rate limit over the specified window.
+func (l *Limiter) Allow(ctx context.Context, key string, max int, window time.Duration) (Result, error) {
 	redisKey := fmt.Sprintf("ratelimit:%s", key)
-	windowMs := l.window.Milliseconds()
+	windowMs := window.Milliseconds()
 	nowMs := time.Now().UnixMilli()
 
-	raw, err := luaScript.Run(ctx, l.client, []string{redisKey}, windowMs, l.max, nowMs).Int64Slice()
+	raw, err := luaScript.Run(ctx, l.client, []string{redisKey}, windowMs, max, nowMs).Int64Slice()
 	if err != nil {
 		return Result{}, err
 	}
@@ -77,7 +73,7 @@ func (l *Limiter) Allow(ctx context.Context, key string) (Result, error) {
 	count := int(raw[0])
 	allowed := raw[1] == 1
 
-	remaining := l.max - count
+	remaining := max - count
 	if remaining < 0 {
 		remaining = 0
 	}
@@ -95,7 +91,7 @@ func (l *Limiter) Allow(ctx context.Context, key string) (Result, error) {
 
 	return Result{
 		Allowed:    allowed,
-		Limit:      l.max,
+		Limit:      max,
 		Remaining:  remaining,
 		RetryAfter: retryAfter,
 	}, nil

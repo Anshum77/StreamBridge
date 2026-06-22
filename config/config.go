@@ -19,8 +19,7 @@ type Config struct {
 	RedisAddr       string
 	RedisPassword   string
 	RedisDB         int
-	RateLimit       int
-	RateWindow      time.Duration
+	AdminAPIKey     string
 	MigrationsPath  string
 	ShutdownTimeout time.Duration
 }
@@ -39,16 +38,6 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
-	rateLimit, err := intEnv("RATE_LIMIT", 100)
-	if err != nil {
-		return Config{}, err
-	}
-
-	rateWindow, err := durationEnv("RATE_WINDOW", time.Minute)
-	if err != nil {
-		return Config{}, err
-	}
-
 	cfg := Config{
 		AppEnv:          stringEnv("APP_ENV", "development"),
 		HTTPAddr:        stringEnv("HTTP_ADDR", ":8080"),
@@ -56,8 +45,7 @@ func Load() (Config, error) {
 		RedisAddr:       stringEnv("REDIS_ADDR", "localhost:6379"),
 		RedisPassword:   stringEnv("REDIS_PASSWORD", ""),
 		RedisDB:         redisDB,
-		RateLimit:       rateLimit,
-		RateWindow:      rateWindow,
+		AdminAPIKey:     stringEnv("ADMIN_API_KEY", "super-secret-admin-key"),
 		MigrationsPath:  stringEnv("MIGRATIONS_PATH", "migrations"),
 		ShutdownTimeout: shutdownTimeout,
 	}
