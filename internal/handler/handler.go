@@ -56,6 +56,7 @@ func (h *Handler) RegisterRoutes(router *gin.Engine) {
 	router.GET("/ready", h.ready)
 
 	channels := router.Group("/channels")
+	channels.Use(middleware.RequireAPIKey(h.tenants))
 	channels.GET("", h.listChannels)
 	channels.POST("", h.createChannel)
 	channels.GET("/:id", h.getChannel)
@@ -77,6 +78,23 @@ func (h *Handler) RegisterRoutes(router *gin.Engine) {
 	})
 	admin.POST("/tenants", h.createTenant)
 	admin.POST("/tenants/:id/keys", h.generateAPIKey)
+}
+
+// getTenantFromContext securely extracts the authenticated tenant from the Gin context.
+func (h *Handler) getTenantFromContext(c *gin.Context) (*model.Tenant, bool) {
+	val, exists := c.Get("tenant")
+	if !exists {
+		h.logger.Error().Msg("tenant missing from context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		return nil, false
+	}
+	tenant, ok := val.(*model.Tenant)
+	if !ok {
+		h.logger.Error().Msg("tenant in context is invalid type")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+		return nil, false
+	}
+	return tenant, true
 }
 
 // health is a lightweight liveness probe — returns 200 if the process is running.
@@ -101,16 +119,22 @@ func (h *Handler) ready(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ready"})
 }
 
-// listChannels returns all channels ordered by newest first.
+// listChannels returns all channels belonging to the authenticated tenant, ordered by newest first.
 func (h *Handler) listChannels(c *gin.Context) {
+	tenant, ok := h.getTenantFromContext(c)
+	if !ok {
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 	defer cancel()
 
 	rows, err := h.db.Query(ctx, `
-		SELECT id, name, created_at, updated_at
+		SELECT id, tenant_id, name, created_at, updated_at
 		FROM channels
+		WHERE tenant_id = $1
 		ORDER BY created_at DESC
-	`)
+	`, tenant.ID)
 	if err != nil {
 		h.internalError(c, err)
 		return
@@ -120,7 +144,7 @@ func (h *Handler) listChannels(c *gin.Context) {
 	channels := make([]model.Channel, 0)
 	for rows.Next() {
 		var channel model.Channel
-		if err := rows.Scan(&channel.ID, &channel.Name, &channel.CreatedAt, &channel.UpdatedAt); err != nil {
+		if err := rows.Scan(&channel.ID, &channel.TenantID, &channel.Name, &channel.CreatedAt, &channel.UpdatedAt); err != nil {
 			h.internalError(c, err)
 			return
 		}
@@ -134,8 +158,13 @@ func (h *Handler) listChannels(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"channels": channels})
 }
 
-// createChannel inserts a new channel and returns it with the generated UUID.
+// createChannel provisions a new channel under the authenticated tenant's namespace.
 func (h *Handler) createChannel(c *gin.Context) {
+	tenant, ok := h.getTenantFromContext(c)
+	if !ok {
+		return
+	}
+
 	var req channelRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -153,10 +182,10 @@ func (h *Handler) createChannel(c *gin.Context) {
 
 	var channel model.Channel
 	err := h.db.QueryRow(ctx, `
-		INSERT INTO channels (name)
-		VALUES ($1)
-		RETURNING id, name, created_at, updated_at
-	`, name).Scan(&channel.ID, &channel.Name, &channel.CreatedAt, &channel.UpdatedAt)
+		INSERT INTO channels (tenant_id, name)
+		VALUES ($1, $2)
+		RETURNING id, tenant_id, name, created_at, updated_at
+	`, tenant.ID, name).Scan(&channel.ID, &channel.TenantID, &channel.Name, &channel.CreatedAt, &channel.UpdatedAt)
 	if err != nil {
 		h.internalError(c, err)
 		return
@@ -165,9 +194,14 @@ func (h *Handler) createChannel(c *gin.Context) {
 	c.JSON(http.StatusCreated, channel)
 }
 
-// getChannel looks up a single channel by its UUID.
+// getChannel looks up a single channel by its UUID, enforcing tenant ownership.
 func (h *Handler) getChannel(c *gin.Context) {
-	channel, err := h.findChannel(c.Request.Context(), c.Param("id"))
+	tenant, ok := h.getTenantFromContext(c)
+	if !ok {
+		return
+	}
+
+	channel, err := h.findChannel(c.Request.Context(), tenant.ID, c.Param("id"))
 	if err != nil {
 		h.handleLookupError(c, err)
 		return
@@ -176,8 +210,13 @@ func (h *Handler) getChannel(c *gin.Context) {
 	c.JSON(http.StatusOK, channel)
 }
 
-// updateChannel replaces the channel name (PUT semantics = full replace).
+// updateChannel replaces the channel name, enforcing tenant ownership.
 func (h *Handler) updateChannel(c *gin.Context) {
+	tenant, ok := h.getTenantFromContext(c)
+	if !ok {
+		return
+	}
+
 	var req channelRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -196,10 +235,10 @@ func (h *Handler) updateChannel(c *gin.Context) {
 	var channel model.Channel
 	err := h.db.QueryRow(ctx, `
 		UPDATE channels
-		SET name = $2, updated_at = now()
-		WHERE id = $1
-		RETURNING id, name, created_at, updated_at
-	`, c.Param("id"), name).Scan(&channel.ID, &channel.Name, &channel.CreatedAt, &channel.UpdatedAt)
+		SET name = $3, updated_at = now()
+		WHERE id = $1 AND tenant_id = $2
+		RETURNING id, tenant_id, name, created_at, updated_at
+	`, c.Param("id"), tenant.ID, name).Scan(&channel.ID, &channel.TenantID, &channel.Name, &channel.CreatedAt, &channel.UpdatedAt)
 	if err != nil {
 		h.handleLookupError(c, err)
 		return
@@ -208,12 +247,17 @@ func (h *Handler) updateChannel(c *gin.Context) {
 	c.JSON(http.StatusOK, channel)
 }
 
-// deleteChannel removes a channel by UUID. Returns 204 on success, 404 if not found.
+// deleteChannel removes a channel by UUID, enforcing tenant ownership.
 func (h *Handler) deleteChannel(c *gin.Context) {
+	tenant, ok := h.getTenantFromContext(c)
+	if !ok {
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 	defer cancel()
 
-	result, err := h.db.Exec(ctx, "DELETE FROM channels WHERE id = $1", c.Param("id"))
+	result, err := h.db.Exec(ctx, "DELETE FROM channels WHERE id = $1 AND tenant_id = $2", c.Param("id"), tenant.ID)
 	if err != nil {
 		h.internalError(c, err)
 		return
@@ -226,17 +270,17 @@ func (h *Handler) deleteChannel(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-// findChannel is a shared lookup used by get and update handlers.
-func (h *Handler) findChannel(parent context.Context, id string) (model.Channel, error) {
+// findChannel is a shared lookup used by get and update handlers, enforcing tenant scoping.
+func (h *Handler) findChannel(parent context.Context, tenantID, channelID string) (model.Channel, error) {
 	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
 	defer cancel()
 
 	var channel model.Channel
 	err := h.db.QueryRow(ctx, `
-		SELECT id, name, created_at, updated_at
+		SELECT id, tenant_id, name, created_at, updated_at
 		FROM channels
-		WHERE id = $1
-	`, id).Scan(&channel.ID, &channel.Name, &channel.CreatedAt, &channel.UpdatedAt)
+		WHERE id = $1 AND tenant_id = $2
+	`, channelID, tenantID).Scan(&channel.ID, &channel.TenantID, &channel.Name, &channel.CreatedAt, &channel.UpdatedAt)
 	if err != nil {
 		return model.Channel{}, err
 	}
@@ -266,7 +310,17 @@ type channelRequest struct {
 
 // subscribeWS upgrades the HTTP connection to WebSocket for real-time event delivery.
 func (h *Handler) subscribeWS(c *gin.Context) {
+	tenant, ok := h.getTenantFromContext(c)
+	if !ok {
+		return
+	}
+
 	channelID := c.Param("id")
+	if _, err := h.findChannel(c.Request.Context(), tenant.ID, channelID); err != nil {
+		h.handleLookupError(c, err)
+		return
+	}
+
 	hub.ServeWS(h.hub, channelID, c.Writer, c.Request, h.logger)
 }
 
@@ -279,7 +333,16 @@ func (h *Handler) publishEvent(c *gin.Context) {
 		return
 	}
 
+	tenant, ok := h.getTenantFromContext(c)
+	if !ok {
+		return
+	}
+
 	channelID := c.Param("id")
+	if _, err := h.findChannel(c.Request.Context(), tenant.ID, channelID); err != nil {
+		h.handleLookupError(c, err)
+		return
+	}
 
 	// Persist first — durable before broadcast.
 	event, err := h.events.Insert(c.Request.Context(), channelID, req.Payload)
@@ -302,7 +365,16 @@ type publishRequest struct {
 // replayEvents returns persisted events for a channel after a given offset.
 // Clients call this on reconnect to catch up on missed events.
 func (h *Handler) replayEvents(c *gin.Context) {
+	tenant, ok := h.getTenantFromContext(c)
+	if !ok {
+		return
+	}
+
 	channelID := c.Param("id")
+	if _, err := h.findChannel(c.Request.Context(), tenant.ID, channelID); err != nil {
+		h.handleLookupError(c, err)
+		return
+	}
 
 	afterOffset, _ := strconv.ParseInt(c.DefaultQuery("after_offset", "0"), 10, 64)
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
