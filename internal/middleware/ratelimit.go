@@ -5,21 +5,36 @@ import (
 	"math"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/Anshum77/StreamBridge/internal/model"
 	"github.com/Anshum77/StreamBridge/internal/ratelimit"
 )
 
-// RateLimiter enforces per-IP request quotas using a Redis-backed sliding window.
-// Exceeding the quota results in a 429 Too Many Requests response.
+// RateLimiter enforces per-tenant request quotas using a Redis-backed sliding window.
+// It extracts the authenticated tenant from the context and applies their specific quota.
 func RateLimiter(limiter *ratelimit.Limiter) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		ip := c.ClientIP()
+		val, exists := c.Get("tenant")
+		if !exists {
+			// Fail-close to protect downstream services if auth middleware was bypassed.
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "tenant context missing"})
+			return
+		}
+		tenant, ok := val.(*model.Tenant)
+		if !ok {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "invalid tenant context"})
+			return
+		}
 
-		res, err := limiter.Allow(c.Request.Context(), ip)
+		// Convert tenant's rate window (stored as seconds) to time.Duration
+		window := time.Duration(tenant.RateWindow) * time.Second
+
+		res, err := limiter.Allow(c.Request.Context(), tenant.ID, tenant.RateLimit, window)
 		if err != nil {
-			// Fail-close to protect downstream services.
+			// Fail-close if Redis is unreachable
 			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "rate limiter unavailable"})
 			return
 		}

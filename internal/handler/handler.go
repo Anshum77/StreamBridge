@@ -31,19 +31,21 @@ type Handler struct {
 	hub      *hub.Hub
 	events   *repository.EventRepo
 	tenants  *repository.TenantRepo
+	channels *repository.ChannelRepo
 	limiter  *ratelimit.Limiter
 	adminKey string
 	logger   zerolog.Logger
 }
 
 // New creates a Handler with all required dependencies.
-func New(db *pgxpool.Pool, redisClient *redis.Client, wsHub *hub.Hub, eventRepo *repository.EventRepo, tenantRepo *repository.TenantRepo, limiter *ratelimit.Limiter, adminKey string, logger zerolog.Logger) *Handler {
+func New(db *pgxpool.Pool, redisClient *redis.Client, wsHub *hub.Hub, eventRepo *repository.EventRepo, tenantRepo *repository.TenantRepo, channelRepo *repository.ChannelRepo, limiter *ratelimit.Limiter, adminKey string, logger zerolog.Logger) *Handler {
 	return &Handler{
 		db:       db,
 		redis:    redisClient,
 		hub:      wsHub,
 		events:   eventRepo,
 		tenants:  tenantRepo,
+		channels: channelRepo,
 		limiter:  limiter,
 		adminKey: adminKey,
 		logger:   logger,
@@ -126,31 +128,8 @@ func (h *Handler) listChannels(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
-	defer cancel()
-
-	rows, err := h.db.Query(ctx, `
-		SELECT id, tenant_id, name, created_at, updated_at
-		FROM channels
-		WHERE tenant_id = $1
-		ORDER BY created_at DESC
-	`, tenant.ID)
+	channels, err := h.channels.List(c.Request.Context(), tenant.ID)
 	if err != nil {
-		h.internalError(c, err)
-		return
-	}
-	defer rows.Close()
-
-	channels := make([]model.Channel, 0)
-	for rows.Next() {
-		var channel model.Channel
-		if err := rows.Scan(&channel.ID, &channel.TenantID, &channel.Name, &channel.CreatedAt, &channel.UpdatedAt); err != nil {
-			h.internalError(c, err)
-			return
-		}
-		channels = append(channels, channel)
-	}
-	if err := rows.Err(); err != nil {
 		h.internalError(c, err)
 		return
 	}
@@ -177,15 +156,7 @@ func (h *Handler) createChannel(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
-	defer cancel()
-
-	var channel model.Channel
-	err := h.db.QueryRow(ctx, `
-		INSERT INTO channels (tenant_id, name)
-		VALUES ($1, $2)
-		RETURNING id, tenant_id, name, created_at, updated_at
-	`, tenant.ID, name).Scan(&channel.ID, &channel.TenantID, &channel.Name, &channel.CreatedAt, &channel.UpdatedAt)
+	channel, err := h.channels.Create(c.Request.Context(), tenant.ID, name)
 	if err != nil {
 		h.internalError(c, err)
 		return
@@ -201,7 +172,7 @@ func (h *Handler) getChannel(c *gin.Context) {
 		return
 	}
 
-	channel, err := h.findChannel(c.Request.Context(), tenant.ID, c.Param("id"))
+	channel, err := h.channels.Get(c.Request.Context(), tenant.ID, c.Param("id"))
 	if err != nil {
 		h.handleLookupError(c, err)
 		return
@@ -229,16 +200,7 @@ func (h *Handler) updateChannel(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
-	defer cancel()
-
-	var channel model.Channel
-	err := h.db.QueryRow(ctx, `
-		UPDATE channels
-		SET name = $3, updated_at = now()
-		WHERE id = $1 AND tenant_id = $2
-		RETURNING id, tenant_id, name, created_at, updated_at
-	`, c.Param("id"), tenant.ID, name).Scan(&channel.ID, &channel.TenantID, &channel.Name, &channel.CreatedAt, &channel.UpdatedAt)
+	channel, err := h.channels.Update(c.Request.Context(), tenant.ID, c.Param("id"), name)
 	if err != nil {
 		h.handleLookupError(c, err)
 		return
@@ -254,15 +216,12 @@ func (h *Handler) deleteChannel(c *gin.Context) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
-	defer cancel()
-
-	result, err := h.db.Exec(ctx, "DELETE FROM channels WHERE id = $1 AND tenant_id = $2", c.Param("id"), tenant.ID)
+	rowsAffected, err := h.channels.Delete(c.Request.Context(), tenant.ID, c.Param("id"))
 	if err != nil {
 		h.internalError(c, err)
 		return
 	}
-	if result.RowsAffected() == 0 {
+	if rowsAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
 		return
 	}
@@ -270,23 +229,6 @@ func (h *Handler) deleteChannel(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-// findChannel is a shared lookup used by get and update handlers, enforcing tenant scoping.
-func (h *Handler) findChannel(parent context.Context, tenantID, channelID string) (model.Channel, error) {
-	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
-	defer cancel()
-
-	var channel model.Channel
-	err := h.db.QueryRow(ctx, `
-		SELECT id, tenant_id, name, created_at, updated_at
-		FROM channels
-		WHERE id = $1 AND tenant_id = $2
-	`, channelID, tenantID).Scan(&channel.ID, &channel.TenantID, &channel.Name, &channel.CreatedAt, &channel.UpdatedAt)
-	if err != nil {
-		return model.Channel{}, err
-	}
-
-	return channel, nil
-}
 
 // handleLookupError maps pgx.ErrNoRows → 404, everything else → 500.
 func (h *Handler) handleLookupError(c *gin.Context, err error) {
@@ -316,7 +258,7 @@ func (h *Handler) subscribeWS(c *gin.Context) {
 	}
 
 	channelID := c.Param("id")
-	if _, err := h.findChannel(c.Request.Context(), tenant.ID, channelID); err != nil {
+	if _, err := h.channels.Get(c.Request.Context(), tenant.ID, channelID); err != nil {
 		h.handleLookupError(c, err)
 		return
 	}
@@ -339,7 +281,7 @@ func (h *Handler) publishEvent(c *gin.Context) {
 	}
 
 	channelID := c.Param("id")
-	if _, err := h.findChannel(c.Request.Context(), tenant.ID, channelID); err != nil {
+	if _, err := h.channels.Get(c.Request.Context(), tenant.ID, channelID); err != nil {
 		h.handleLookupError(c, err)
 		return
 	}
@@ -371,7 +313,7 @@ func (h *Handler) replayEvents(c *gin.Context) {
 	}
 
 	channelID := c.Param("id")
-	if _, err := h.findChannel(c.Request.Context(), tenant.ID, channelID); err != nil {
+	if _, err := h.channels.Get(c.Request.Context(), tenant.ID, channelID); err != nil {
 		h.handleLookupError(c, err)
 		return
 	}

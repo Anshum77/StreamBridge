@@ -76,9 +76,10 @@ func main() {
 
 	eventRepo := repository.NewEventRepo(dbPool)
 	tenantRepo := repository.NewTenantRepo(dbPool)
-	limiter := ratelimit.NewLimiter(redisClient, cfg.RateLimit, cfg.RateWindow)
+	channelRepo := repository.NewChannelRepo(dbPool)
+	limiter := ratelimit.NewLimiter(redisClient)
 
-	serverHandler := handler.New(dbPool, redisClient, wsHub, eventRepo, tenantRepo, limiter, cfg.AdminAPIKey, logger)
+	serverHandler := handler.New(dbPool, redisClient, wsHub, eventRepo, tenantRepo, channelRepo, limiter, cfg.AdminAPIKey, logger)
 	serverHandler.RegisterRoutes(router)
 
 	server := &http.Server{
