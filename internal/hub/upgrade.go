@@ -19,7 +19,8 @@ var upgrader = websocket.Upgrader{
 
 // ServeWS upgrades an HTTP request to a WebSocket connection and starts
 // the read/write pump goroutines for bidirectional communication.
-func ServeWS(hub *Hub, channelID string, w http.ResponseWriter, r *http.Request, logger zerolog.Logger) {
+// Replays any missed events before registering the client to the live broadcast.
+func ServeWS(hub *Hub, channelID string, w http.ResponseWriter, r *http.Request, missedEvents [][]byte, logger zerolog.Logger) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		logger.Error().Err(err).Msg("websocket upgrade failed")
@@ -38,10 +39,15 @@ func ServeWS(hub *Hub, channelID string, w http.ResponseWriter, r *http.Request,
 		Str("remote", conn.RemoteAddr().String()).
 		Msg("websocket client connected")
 
-	// Register with the Hub so this client receives broadcasts for its channel.
-	hub.register <- client
+	// Push missed events into the buffer before launching pumps to ensure strict ordering
+	for _, payload := range missedEvents {
+		client.send <- payload
+	}
 
 	// Launch bidirectional I/O pumps.
 	go client.writePump()
 	go client.readPump()
+
+	// Register with the Hub so this client receives broadcasts for its channel.
+	hub.register <- client
 }

@@ -250,6 +250,8 @@ type channelRequest struct {
 	Name string `json:"name"`
 }
 
+const defaultReplayLimit = 100
+
 // subscribeWS upgrades the HTTP connection to WebSocket for real-time event delivery.
 func (h *Handler) subscribeWS(c *gin.Context) {
 	tenant, ok := h.getTenantFromContext(c)
@@ -263,7 +265,30 @@ func (h *Handler) subscribeWS(c *gin.Context) {
 		return
 	}
 
-	hub.ServeWS(h.hub, channelID, c.Writer, c.Request, h.logger)
+	var missedEvents [][]byte
+	lastSeenOffsetStr := c.Query("last_seen_offset")
+	
+	if lastSeenOffsetStr != "" {
+		lastSeenOffset, err := strconv.ParseInt(lastSeenOffsetStr, 10, 64)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid last_seen_offset parameter"})
+			return
+		}
+		
+		events, fetchErr := h.events.ListAfterOffset(c.Request.Context(), channelID, lastSeenOffset, defaultReplayLimit)
+		if fetchErr != nil {
+			h.internalError(c, fetchErr)
+			return
+		}
+		
+		for _, ev := range events {
+			if payload, marshalErr := json.Marshal(ev); marshalErr == nil {
+				missedEvents = append(missedEvents, payload)
+			}
+		}
+	}
+
+	hub.ServeWS(h.hub, channelID, c.Writer, c.Request, missedEvents, h.logger)
 }
 
 // publishEvent persists an event to Postgres, then broadcasts to WebSocket subscribers.
