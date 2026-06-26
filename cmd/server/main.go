@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
 
 	"github.com/Anshum77/StreamBridge/cache"
@@ -68,6 +69,10 @@ func main() {
 	router := gin.New()
 	router.Use(gin.Recovery())
 	router.Use(middleware.RequestLogger(logger))
+	router.Use(middleware.MetricsRecorder())
+
+	// Expose Prometheus metrics endpoint
+	router.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	// WebSocket hub — central coordinator for all real-time connections.
 	// Must be running before any client can register.

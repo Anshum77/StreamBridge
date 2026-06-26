@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/Anshum77/StreamBridge/internal/metrics"
 	"github.com/Anshum77/StreamBridge/internal/model"
 	"github.com/Anshum77/StreamBridge/internal/ratelimit"
 )
@@ -51,6 +52,9 @@ func RateLimiter(limiter *ratelimit.Limiter) gin.HandlerFunc {
 			}
 
 			c.Header("Retry-After", strconv.Itoa(retrySec))
+			
+			metrics.RateLimitHits.Inc()
+			
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
 				"error":       "too many requests",
 				"retry_after": fmt.Sprintf("%ds", retrySec),

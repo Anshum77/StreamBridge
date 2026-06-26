@@ -1,6 +1,9 @@
 package hub
 
-import "github.com/rs/zerolog"
+import (
+	"github.com/Anshum77/StreamBridge/internal/metrics"
+	"github.com/rs/zerolog"
+)
 
 // Message carries an event payload to all subscribers of a specific channel.
 type Message struct {
@@ -56,6 +59,7 @@ func (h *Hub) Run() {
 				Str("channel", client.channelID).
 				Int("subscribers", len(h.clients[client.channelID])).
 				Msg("client registered")
+			metrics.ActiveConnections.Inc()
 
 		case client := <-h.unregister:
 			if subscribers, ok := h.clients[client.channelID]; ok {
@@ -72,6 +76,7 @@ func (h *Hub) Run() {
 						Str("channel", client.channelID).
 						Int("subscribers", len(h.clients[client.channelID])).
 						Msg("client unregistered")
+					metrics.ActiveConnections.Dec()
 				}
 			}
 
@@ -88,6 +93,7 @@ func (h *Hub) Run() {
 					h.logger.Warn().
 						Str("channel", client.channelID).
 						Msg("dropped slow client")
+					metrics.ActiveConnections.Dec()
 				}
 			}
 		}

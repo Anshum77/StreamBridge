@@ -18,6 +18,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/Anshum77/StreamBridge/internal/hub"
+	"github.com/Anshum77/StreamBridge/internal/metrics"
 	"github.com/Anshum77/StreamBridge/internal/middleware"
 	"github.com/Anshum77/StreamBridge/internal/model"
 	"github.com/Anshum77/StreamBridge/internal/ratelimit"
@@ -321,6 +322,8 @@ func (h *Handler) publishEvent(c *gin.Context) {
 	// Broadcast to live WebSocket subscribers.
 	wsPayload, _ := json.Marshal(event)
 	h.hub.Broadcast(channelID, wsPayload)
+
+	metrics.EventsPublished.Inc()
 
 	c.JSON(http.StatusCreated, event)
 }
