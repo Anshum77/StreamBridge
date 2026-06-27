@@ -11,6 +11,7 @@ services:
       REDIS_DB: 0
       MIGRATIONS_PATH: migrations
       SHUTDOWN_TIMEOUT: 15s
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-super-secret-admin-key}
     ports:
       - "8080:8080"
     depends_on:

@@ -31,7 +31,7 @@ func ServeWS(hub *Hub, channelID string, w http.ResponseWriter, r *http.Request,
 		hub:       hub,
 		conn:      conn,
 		channelID: channelID,
-		send:      make(chan []byte, 256),
+		send:      make(chan []byte, 4096),
 		logger:    logger.With().Str("channel", channelID).Logger(),
 	}
 
