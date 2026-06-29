@@ -7,16 +7,16 @@
 ![Prometheus](https://img.shields.io/badge/Prometheus-Metrics-E6522C?style=for-the-badge&logo=prometheus)
 ![License](https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge)
 
-**StreamBridge** is a high-performance, multi-tenant event broker built in Go. It provides a RESTful API for ingesting events and fans them out in real-time to thousands of concurrent clients via WebSockets. 
+**StreamBridge** is a high-performance, multi-tenant event broker built in Go. It provides a RESTful API for ingesting events and fans them out in real-time to hundreds of concurrent WebSocket clients, with an architecture designed to scale horizontally. 
 
 Designed for horizontal scaling through stateless application instances and shared Redis/PostgreSQL infrastructure.
 
 ## 🚀 Key Features
 
-- **Massive Fan-out Throughput**: Sustains over 40,000 WebSocket message deliveries per second on standard laptop hardware.
+- **Fan-out Throughput**: Sustained ~40K WebSocket message deliveries/sec in local k6 benchmarks.
 - **Multi-Tenant Architecture**: Strict logical isolation between tenants using `tenant_id` scopes.
 - **Concurrent Hub Architecture**: Optimized WebSocket broadcasting with buffered client queues and slow-consumer eviction.
-- **Channel-based Design**: Thread-safe channel-based Hub minimizes lock contention during heavy event broadcasting.
+- **Channel-based Design**: Thread-safe channel-based event loop minimizes shared-state contention during heavy event broadcasting.
 - **Distributed Rate Limiting**: Redis-backed sliding window rate limits protect the broker from noisy neighbors.
 - **Robust Observability**: Built-in Prometheus metrics (`/metrics`) and standard health/readiness probes.
 
